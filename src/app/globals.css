@@ -18,8 +18,10 @@
 
 html,
 body {
+  height: 100%;
   min-height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 body {
@@ -51,18 +53,27 @@ textarea:focus-visible {
 .app-shell {
   display: flex;
   width: 100%;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  padding-left: 262px;
 }
 
 .sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 2;
   display: flex;
   width: 262px;
   min-width: 262px;
-  min-height: 100dvh;
+  height: auto;
+  flex: 0 0 262px;
   flex-direction: column;
   padding: 30px 17px 21px;
   border-right: 1px solid #e9e7e1;
   background: #f3f1eb;
+  overflow-y: auto;
 }
 
 .brand,
@@ -229,7 +240,9 @@ kbd {
 .chat-panel {
   display: flex;
   min-width: 0;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   flex: 1;
   flex-direction: column;
   background:
@@ -275,6 +288,7 @@ kbd {
   display: flex;
   width: min(100%, 804px);
   flex: 1;
+  min-height: 0;
   flex-direction: column;
   align-self: center;
   padding: 0 46px;
@@ -398,6 +412,7 @@ kbd {
 .message-list {
   display: flex;
   flex: 1;
+  min-height: 0;
   flex-direction: column;
   gap: 30px;
   overflow-y: auto;
@@ -723,6 +738,10 @@ kbd {
 }
 
 @media (max-width: 760px) {
+  .app-shell {
+    padding-left: 0;
+  }
+
   .sidebar {
     display: none;
   }
