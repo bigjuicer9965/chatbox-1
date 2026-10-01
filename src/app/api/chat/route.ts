@@ -64,6 +64,20 @@ function getRecentContext(messages: ChatMessage[]): ChatMessage[] {
   return recent.reverse();
 }
 
+function getVisibleText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .map((block) => {
+      if (typeof block !== "object" || block === null) return "";
+      if ("thought" in block && block.thought === true) return "";
+      if ("type" in block && block.type === "reasoning") return "";
+      return "text" in block && typeof block.text === "string" ? block.text : "";
+    })
+    .join("");
+}
+
 export async function POST(request: Request) {
   let body: unknown;
 
@@ -117,17 +131,7 @@ export async function POST(request: Request) {
         let hasText = false;
 
         for await (const chunk of chunks) {
-          const content = chunk.content;
-          const text =
-            typeof content === "string"
-              ? content
-              : content
-                  .map((block) =>
-                    typeof block === "object" && "text" in block && typeof block.text === "string"
-                      ? block.text
-                      : "",
-                  )
-                  .join("");
+          const text = getVisibleText(chunk.content);
 
           if (text) {
             hasText = true;
