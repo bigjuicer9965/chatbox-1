@@ -208,11 +208,29 @@ kbd {
   scrollbar-width: thin;
 }
 
-.conversation-history-item {
-  overflow: hidden;
-  padding: 9px 10px;
+.conversation-history-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
   border: 1px solid transparent;
   border-radius: 5px;
+}
+
+.conversation-history-row:hover,
+.conversation-history-row:focus-within,
+.conversation-history-row.is-active {
+  border-color: #e4e2da;
+  background: rgba(250, 249, 246, 0.75);
+}
+
+.conversation-history-item {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 4px;
   background: transparent;
   color: #65675e;
   cursor: pointer;
@@ -222,15 +240,57 @@ kbd {
   white-space: nowrap;
 }
 
-.conversation-history-item:hover,
+.conversation-history-row:hover .conversation-history-item,
+.conversation-history-row:focus-within .conversation-history-item,
 .conversation-history-item[aria-current="true"] {
-  border-color: #e4e2da;
-  background: rgba(250, 249, 246, 0.75);
   color: #393b35;
 }
 
-.conversation-history-item:disabled {
-  cursor: not-allowed;
+.conversation-delete-button {
+  display: grid;
+  width: 27px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  margin-right: 3px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #85877e;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+
+.conversation-history-row:hover .conversation-delete-button,
+.conversation-history-row:focus-within .conversation-delete-button,
+.conversation-history-row.is-active .conversation-delete-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.conversation-delete-button:hover {
+  background: #f4e8e3;
+  color: #824b3e;
+}
+
+.conversation-delete-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+@media (hover: none) {
+  .conversation-delete-button {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .storage-notice {

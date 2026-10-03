@@ -202,8 +202,13 @@ export default function Home() {
   const { conversations, activeConversationId } = parsedSavedState.state;
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [storageError, setStorageError] = useState("");
+  const activeRequestRef = useRef<{
+    conversationId: string;
+    controller: AbortController;
+  } | null>(null);
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const visibleStorageError = storageError || parsedSavedState.error;
@@ -211,6 +216,7 @@ export default function Home() {
     (conversation) => conversation.id === activeConversationId,
   );
   const messages = activeConversation?.messages ?? EMPTY_MESSAGES;
+  const isStreamingConversation = streamingConversationId === activeConversationId;
 
   useEffect(() => {
     const messageList = endOfMessagesRef.current?.parentElement;
@@ -242,7 +248,12 @@ export default function Home() {
     });
   }, [saveChatState]);
 
-  const updateConversation = useCallback((id: string, title: string, nextMessages: Message[]) => {
+  const updateConversation = useCallback((
+    id: string,
+    title: string,
+    nextMessages: Message[],
+    activate = true,
+  ) => {
     const current = parseSavedChatState(getSavedChatsSnapshot()).state;
     const updatedConversation: Conversation = {
       id,
@@ -252,7 +263,7 @@ export default function Home() {
     };
     saveChatState({
       ...current,
-      activeConversationId: id,
+      activeConversationId: activate ? id : current.activeConversationId,
       conversations: [
         updatedConversation,
         ...current.conversations.filter((conversation) => conversation.id !== id),
@@ -260,11 +271,33 @@ export default function Home() {
     });
   }, [saveChatState]);
 
+  const deleteConversation = useCallback((id: string) => {
+    const current = parseSavedChatState(getSavedChatsSnapshot()).state;
+    saveChatState({
+      ...current,
+      activeConversationId: current.activeConversationId === id
+        ? null
+        : current.activeConversationId,
+      conversations: current.conversations.filter((conversation) => conversation.id !== id),
+    });
+
+    if (activeRequestRef.current?.conversationId === id) {
+      activeRequestRef.current.controller.abort();
+      activeRequestRef.current = null;
+      setIsSending(false);
+      setStreamingConversationId(null);
+    }
+
+    if (current.activeConversationId === id) {
+      setError("");
+      setInput("");
+    }
+  }, [saveChatState]);
+
   useEffect(() => {
     function handleShortcut(event: globalThis.KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        if (isSending) return;
         selectConversation(null);
         setError("");
         setInput("");
@@ -274,23 +307,26 @@ export default function Home() {
 
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [isSending, selectConversation]);
+  }, [selectConversation]);
 
   async function sendMessage(text: string, retry = false) {
     const content = text.trim();
-    if (!content || isSending) return;
+    if (!content || activeRequestRef.current) return;
 
     const userMessage: Message = { role: "user", content };
     const conversationId = activeConversationId ?? crypto.randomUUID();
     const conversationTitle =
       activeConversation?.title ?? content.slice(0, 60);
     const conversation = retry ? messages : [...messages, userMessage];
+    const request = { conversationId, controller: new AbortController() };
+    activeRequestRef.current = request;
     if (!retry) {
       updateConversation(conversationId, conversationTitle, conversation);
     }
     setInput("");
     setError("");
     setIsSending(true);
+    setStreamingConversationId(conversationId);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     let assistantContent = "";
@@ -300,11 +336,11 @@ export default function Home() {
         clearTimeout(updateTimer);
         updateTimer = undefined;
       }
-      if (!assistantContent) return;
+      if (!assistantContent || request.controller.signal.aborted) return;
       updateConversation(conversationId, conversationTitle, [
         ...conversation,
         { role: "assistant", content: assistantContent },
-      ]);
+      ], false);
     };
 
     try {
@@ -315,6 +351,7 @@ export default function Home() {
           Accept: "text/event-stream",
         },
         body: JSON.stringify({ messages: conversation }),
+        signal: request.controller.signal,
       });
 
       if (!response.ok) {
@@ -329,7 +366,7 @@ export default function Home() {
         ...conversation,
         { role: "assistant" as const, content: "" },
       ];
-      updateConversation(conversationId, conversationTitle, conversationWithAssistant);
+      updateConversation(conversationId, conversationTitle, conversationWithAssistant, false);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -373,22 +410,38 @@ export default function Home() {
       flushAssistantUpdate();
 
       if (!assistantContent) {
-        updateConversation(conversationId, conversationTitle, conversation);
+        updateConversation(conversationId, conversationTitle, conversation, false);
       }
     } catch (sendError) {
       if (updateTimer !== undefined) {
         clearTimeout(updateTimer);
         updateTimer = undefined;
       }
-      updateConversation(conversationId, conversationTitle, conversation);
-      setError(
-        sendError instanceof Error
-          ? sendError.message
-          : "Something went wrong. Please try again.",
-      );
+      if (!request.controller.signal.aborted) {
+        updateConversation(conversationId, conversationTitle, conversation, false);
+      }
+      if (
+        !request.controller.signal.aborted &&
+        parseSavedChatState(getSavedChatsSnapshot()).state.activeConversationId === conversationId
+      ) {
+        setError(
+          sendError instanceof Error
+            ? sendError.message
+            : "Something went wrong. Please try again.",
+        );
+      }
     } finally {
-      setIsSending(false);
-      textareaRef.current?.focus();
+      if (activeRequestRef.current === request) {
+        activeRequestRef.current = null;
+        setIsSending(false);
+        setStreamingConversationId(null);
+      }
+      if (
+        !request.controller.signal.aborted &&
+        parseSavedChatState(getSavedChatsSnapshot()).state.activeConversationId === conversationId
+      ) {
+        textareaRef.current?.focus();
+      }
     }
   }
 
@@ -405,7 +458,6 @@ export default function Home() {
   }
 
   function startNewChat() {
-    if (isSending) return;
     selectConversation(null);
     setError("");
     setInput("");
@@ -422,7 +474,7 @@ export default function Home() {
           <span>kindred</span>
         </Link>
 
-        <button className="new-chat-button" disabled={isSending} onClick={startNewChat} type="button">
+        <button className="new-chat-button" onClick={startNewChat} type="button">
           <span className="new-chat-plus">+</span>
           New conversation
           <kbd>⌘ K</kbd>
@@ -433,20 +485,34 @@ export default function Home() {
           {conversations.length ? (
             <div className="conversation-history">
               {conversations.map((conversation) => (
-                <button
-                  aria-current={conversation.id === activeConversationId ? "true" : undefined}
-                  className="conversation-history-item"
-                  disabled={isSending}
+                <div
+                  className={`conversation-history-row${conversation.id === activeConversationId ? " is-active" : ""}`}
                   key={conversation.id}
-                  onClick={() => {
-                    selectConversation(conversation.id);
-                    setError("");
-                    setInput("");
-                  }}
-                  type="button"
                 >
-                  {conversation.title}
-                </button>
+                  <button
+                    aria-current={conversation.id === activeConversationId ? "true" : undefined}
+                    className="conversation-history-item"
+                    onClick={() => {
+                      selectConversation(conversation.id);
+                      setError("");
+                      setInput("");
+                    }}
+                    type="button"
+                  >
+                    {conversation.title}
+                  </button>
+                  <button
+                    aria-label={`Delete conversation: ${conversation.title}`}
+                    className="conversation-delete-button"
+                    onClick={() => deleteConversation(conversation.id)}
+                    title="Delete conversation"
+                    type="button"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3" />
+                    </svg>
+                  </button>
+                </div>
               ))}
             </div>
           ) : (
@@ -481,7 +547,6 @@ export default function Home() {
           </div>
           <button
             className="topbar-new-chat"
-            disabled={isSending}
             onClick={startNewChat}
             type="button"
             aria-label="Start a new conversation"
@@ -493,81 +558,92 @@ export default function Home() {
 
         <div className="conversation">
           {messages.length === 0 ? (
-            <div className="welcome">
-              <p className="eyebrow">A MOMENT FOR WHAT MATTERS</p>
-              <h1>Where would you<br />like to <em>begin?</em></h1>
-              <p className="welcome-description">
-                A question, a passing thought, the thing you&apos;ve been meaning
-                to figure out. Start anywhere.
-              </p>
-              <div className="suggestions">
-                {suggestions.map((suggestion) => (
-                  <button
-                    className="suggestion"
-                    key={suggestion.title}
-                    onClick={() => void sendMessage(suggestion.prompt)}
-                    type="button"
-                  >
-                    <span className="suggestion-index">{suggestion.icon}</span>
-                    <span className="suggestion-copy">
-                      <span className="suggestion-title">{suggestion.title}</span>
-                      <span className="suggestion-detail">{suggestion.detail}</span>
-                    </span>
-                    <span className="suggestion-arrow" aria-hidden="true">↗</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="message-list" aria-live="polite">
-              {messages.map((message, index) => {
-                const isStreamingMessage =
-                  isSending && index === messages.length - 1 && message.role === "assistant";
-                return (
-                  <article className={`message message-${message.role}`} key={`${index}-${message.role}`}>
-                    {message.role === "assistant" ? (
-                      <span className="message-avatar"><SparkIcon /></span>
-                    ) : null}
-                    <div className="message-content">
-                      <span className="message-author">
-                        {message.role === "assistant" ? "Kindred" : "You"}
+              <div className="welcome">
+                <p className="eyebrow">A MOMENT FOR WHAT MATTERS</p>
+                <h1>Where would you<br />like to <em>begin?</em></h1>
+                <p className="welcome-description">
+                  A question, a passing thought, the thing you&apos;ve been meaning
+                  to figure out. Start anywhere.
+                </p>
+                <div className="suggestions">
+                  {suggestions.map((suggestion) => (
+                    <button
+                      className="suggestion"
+                      key={suggestion.title}
+                      onClick={() => void sendMessage(suggestion.prompt)}
+                      type="button"
+                    >
+                      <span className="suggestion-index">{suggestion.icon}</span>
+                      <span className="suggestion-copy">
+                        <span className="suggestion-title">{suggestion.title}</span>
+                        <span className="suggestion-detail">{suggestion.detail}</span>
                       </span>
-                      {message.role === "assistant" ? (
-                        isStreamingMessage && !message.content ? (
-                          <div className="typing-indicator" aria-label="Kindred is thinking">
-                            <span /><span /><span />
-                          </div>
-                        ) : (
-                          <div className={`markdown-content${isStreamingMessage ? " streaming-content" : ""}`}>
-                            {isStreamingMessage ? (
-                              <>
-                                <span className="streaming-text">{message.content}</span>
-                                <span className="streaming-cursor" aria-hidden="true" />
-                              </>
-                            ) : (
-                              <ReactMarkdown>{message.content}</ReactMarkdown>
-                            )}
-                          </div>
-                        )
-                      ) : (
-                        <p>{message.content}</p>
-                      )}
-                    </div>
-                    {message.role === "user" ? <span className="user-message-avatar">Y</span> : null}
-                  </article>
-                );
-              })}
-              {error ? (
-                <div className="error-message" role="alert">
-                  <span>{error}</span>
-                  <button onClick={() => void sendMessage(messages[messages.length - 1]?.content ?? "", true)} type="button">
-                    Try again
-                  </button>
+                      <span className="suggestion-arrow" aria-hidden="true">↗</span>
+                    </button>
+                  ))}
                 </div>
-              ) : null}
-              <div ref={endOfMessagesRef} />
-            </div>
-          )}
+              </div>
+            ) : (
+              <div className="message-list" aria-live="polite">
+                {messages.map((message, index) => {
+                  const isStreamingMessage =
+                    isStreamingConversation && index === messages.length - 1 && message.role === "assistant";
+                  return (
+                    <article className={`message message-${message.role}`} key={`${index}-${message.role}`}>
+                      {message.role === "assistant" ? (
+                        <span className="message-avatar"><SparkIcon /></span>
+                      ) : null}
+                      <div className="message-content">
+                        <span className="message-author">
+                          {message.role === "assistant" ? "Kindred" : "You"}
+                        </span>
+                        {message.role === "assistant" ? (
+                          isStreamingMessage && !message.content ? (
+                            <div className="typing-indicator" aria-label="Kindred is thinking">
+                              <span /><span /><span />
+                            </div>
+                          ) : (
+                            <div className={`markdown-content${isStreamingMessage ? " streaming-content" : ""}`}>
+                              {isStreamingMessage ? (
+                                <>
+                                  <span className="streaming-text">{message.content}</span>
+                                  <span className="streaming-cursor" aria-hidden="true" />
+                                </>
+                              ) : (
+                                <ReactMarkdown>{message.content}</ReactMarkdown>
+                              )}
+                            </div>
+                          )
+                        ) : (
+                          <p>{message.content}</p>
+                        )}
+                      </div>
+                      {message.role === "user" ? <span className="user-message-avatar">Y</span> : null}
+                    </article>
+                  );
+                })}
+                {isStreamingConversation && messages[messages.length - 1]?.role !== "assistant" ? (
+                  <article className="message message-assistant">
+                    <span className="message-avatar"><SparkIcon /></span>
+                    <div className="message-content">
+                      <span className="message-author">Kindred</span>
+                      <div className="typing-indicator" aria-label="Kindred is thinking">
+                        <span /><span /><span />
+                      </div>
+                    </div>
+                  </article>
+                ) : null}
+                {error ? (
+                  <div className="error-message" role="alert">
+                    <span>{error}</span>
+                    <button onClick={() => void sendMessage(messages[messages.length - 1]?.content ?? "", true)} type="button">
+                      Try again
+                    </button>
+                  </div>
+                ) : null}
+                <div ref={endOfMessagesRef} />
+              </div>
+            )}
         </div>
 
         <div className="composer-area">
