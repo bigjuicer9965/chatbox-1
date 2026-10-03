@@ -80,7 +80,7 @@ export async function POST(request: Request) {
 
   const chat = new ChatGoogle({
     apiKey,
-    model: process.env.GOOGLE_MODEL || "gemini-3.7-flash",
+    model: process.env.GOOGLE_MODEL || "gemini-3.6-flash",
     temperature: 0.7,
   });
 
