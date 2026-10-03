@@ -1,6 +1,15 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 
@@ -8,6 +17,139 @@ type Message = {
   role: "user" | "assistant";
   content: string;
 };
+
+type Conversation = {
+  id: string;
+  title: string;
+  messages: Message[];
+  updatedAt: string;
+};
+
+type SavedChatState = {
+  conversations: Conversation[];
+  activeConversationId: string | null;
+};
+
+const STORAGE_KEY = "kindred-conversations";
+const STORAGE_CHANGE_EVENT = "kindred-storage-change";
+const STREAM_UPDATE_INTERVAL = 48;
+const EMPTY_MESSAGES: Message[] = [];
+const EMPTY_SAVED_CHAT_STATE: SavedChatState = {
+  conversations: [],
+  activeConversationId: null,
+};
+const EMPTY_SAVED_CHAT_STATE_JSON = JSON.stringify(EMPTY_SAVED_CHAT_STATE);
+const STORAGE_UNAVAILABLE_PREFIX = "__kindred_storage_unavailable__:";
+let memorySnapshot = EMPTY_SAVED_CHAT_STATE_JSON;
+
+function subscribeToSavedChats(onChange: () => void) {
+  window.addEventListener("storage", onChange);
+  window.addEventListener(STORAGE_CHANGE_EVENT, onChange);
+  return () => {
+    window.removeEventListener("storage", onChange);
+    window.removeEventListener(STORAGE_CHANGE_EVENT, onChange);
+  };
+}
+
+function getSavedChatsSnapshot() {
+  try {
+    const serialized = window.localStorage.getItem(STORAGE_KEY);
+    if (serialized !== null) {
+      memorySnapshot = serialized;
+      return serialized;
+    }
+    return EMPTY_SAVED_CHAT_STATE_JSON;
+  } catch {
+    return `${STORAGE_UNAVAILABLE_PREFIX}${memorySnapshot}`;
+  }
+}
+
+function getServerSavedChatsSnapshot() {
+  return EMPTY_SAVED_CHAT_STATE_JSON;
+}
+
+function isMessage(value: unknown): value is Message {
+  if (typeof value !== "object" || value === null || !("role" in value) || !("content" in value)) {
+    return false;
+  }
+
+  return (
+    (value.role === "user" || value.role === "assistant") &&
+    typeof value.content === "string"
+  );
+}
+
+function isConversation(value: unknown): value is Conversation {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("id" in value) ||
+    !("title" in value) ||
+    !("messages" in value) ||
+    !("updatedAt" in value)
+  ) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    Array.isArray(value.messages) &&
+    value.messages.every(isMessage) &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isSavedChatState(value: unknown): value is SavedChatState {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("conversations" in value) ||
+    !("activeConversationId" in value)
+  ) {
+    return false;
+  }
+
+  return (
+    Array.isArray(value.conversations) &&
+    value.conversations.every(isConversation) &&
+    (typeof value.activeConversationId === "string" || value.activeConversationId === null)
+  );
+}
+
+function parseSavedChatState(serialized: string) {
+  const storageUnavailable = serialized.startsWith(STORAGE_UNAVAILABLE_PREFIX);
+  const value = storageUnavailable
+    ? serialized.slice(STORAGE_UNAVAILABLE_PREFIX.length)
+    : serialized;
+
+  try {
+    const saved: unknown = JSON.parse(value);
+    if (!isSavedChatState(saved)) {
+      throw new Error("Saved conversation data has an invalid format.");
+    }
+
+    return {
+      state: {
+        ...saved,
+        activeConversationId: saved.conversations.some(
+          (conversation) => conversation.id === saved.activeConversationId,
+        )
+          ? saved.activeConversationId
+          : null,
+      },
+      error: storageUnavailable
+        ? "Browser storage is unavailable. Conversations will only remain available in this tab."
+        : "",
+    };
+  } catch (loadError) {
+    console.error("Could not load saved conversations:", loadError);
+    return {
+      state: EMPTY_SAVED_CHAT_STATE,
+      error: "Saved conversations could not be loaded. Your next sent message will replace the damaged local history.",
+    };
+  }
+}
 
 const suggestions = [
   {
@@ -48,22 +190,82 @@ function ArrowIcon() {
 }
 
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const serializedSavedState = useSyncExternalStore(
+    subscribeToSavedChats,
+    getSavedChatsSnapshot,
+    getServerSavedChatsSnapshot,
+  );
+  const parsedSavedState = useMemo(
+    () => parseSavedChatState(serializedSavedState),
+    [serializedSavedState],
+  );
+  const { conversations, activeConversationId } = parsedSavedState.state;
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState("");
+  const [storageError, setStorageError] = useState("");
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const visibleStorageError = storageError || parsedSavedState.error;
+  const activeConversation = conversations.find(
+    (conversation) => conversation.id === activeConversationId,
+  );
+  const messages = activeConversation?.messages ?? EMPTY_MESSAGES;
 
   useEffect(() => {
+    const messageList = endOfMessagesRef.current?.parentElement;
+    if (isSending && messageList) {
+      messageList.scrollTop = messageList.scrollHeight;
+      return;
+    }
     endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isSending]);
+
+  const saveChatState = useCallback((nextState: SavedChatState) => {
+    const serialized = JSON.stringify(nextState);
+    try {
+      window.localStorage.setItem(STORAGE_KEY, serialized);
+      memorySnapshot = serialized;
+      setStorageError("");
+    } catch (saveError) {
+      console.error("Could not save conversations:", saveError);
+      memorySnapshot = serialized;
+      setStorageError("Conversations could not be saved. They will only remain available in this tab.");
+    }
+    window.dispatchEvent(new Event(STORAGE_CHANGE_EVENT));
+  }, []);
+
+  const selectConversation = useCallback((id: string | null) => {
+    saveChatState({
+      ...parseSavedChatState(getSavedChatsSnapshot()).state,
+      activeConversationId: id,
+    });
+  }, [saveChatState]);
+
+  const updateConversation = useCallback((id: string, title: string, nextMessages: Message[]) => {
+    const current = parseSavedChatState(getSavedChatsSnapshot()).state;
+    const updatedConversation: Conversation = {
+      id,
+      title,
+      messages: nextMessages,
+      updatedAt: new Date().toISOString(),
+    };
+    saveChatState({
+      ...current,
+      activeConversationId: id,
+      conversations: [
+        updatedConversation,
+        ...current.conversations.filter((conversation) => conversation.id !== id),
+      ],
+    });
+  }, [saveChatState]);
 
   useEffect(() => {
     function handleShortcut(event: globalThis.KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setMessages([]);
+        if (isSending) return;
+        selectConversation(null);
         setError("");
         setInput("");
         textareaRef.current?.focus();
@@ -72,19 +274,38 @@ export default function Home() {
 
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, []);
+  }, [isSending, selectConversation]);
 
   async function sendMessage(text: string, retry = false) {
     const content = text.trim();
     if (!content || isSending) return;
 
     const userMessage: Message = { role: "user", content };
+    const conversationId = activeConversationId ?? crypto.randomUUID();
+    const conversationTitle =
+      activeConversation?.title ?? content.slice(0, 60);
     const conversation = retry ? messages : [...messages, userMessage];
-    if (!retry) setMessages(conversation);
+    if (!retry) {
+      updateConversation(conversationId, conversationTitle, conversation);
+    }
     setInput("");
     setError("");
     setIsSending(true);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+    let assistantContent = "";
+    let updateTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushAssistantUpdate = () => {
+      if (updateTimer !== undefined) {
+        clearTimeout(updateTimer);
+        updateTimer = undefined;
+      }
+      if (!assistantContent) return;
+      updateConversation(conversationId, conversationTitle, [
+        ...conversation,
+        { role: "assistant", content: assistantContent },
+      ]);
+    };
 
     try {
       const response = await fetch("/api/chat", {
@@ -104,8 +325,11 @@ export default function Home() {
         throw new Error("The response stream could not be opened. Please try again.");
       }
 
-      const assistantIndex = conversation.length;
-      setMessages([...conversation, { role: "assistant", content: "" }]);
+      const conversationWithAssistant = [
+        ...conversation,
+        { role: "assistant" as const, content: "" },
+      ];
+      updateConversation(conversationId, conversationTitle, conversationWithAssistant);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -122,15 +346,10 @@ export default function Home() {
         if (data.error) throw new Error(data.error);
         if (data.done) streamCompleted = true;
         if (data.token) {
-          setMessages((current) =>
-            current[assistantIndex]?.role === "assistant"
-              ? current.map((message, index) =>
-                  index === assistantIndex
-                    ? { ...message, content: message.content + data.token }
-                    : message,
-                )
-              : current,
-          );
+          assistantContent += data.token;
+          if (updateTimer === undefined) {
+            updateTimer = setTimeout(flushAssistantUpdate, STREAM_UPDATE_INTERVAL);
+          }
         }
       }
 
@@ -151,19 +370,17 @@ export default function Home() {
       if (!streamCompleted) {
         throw new Error("The connection ended before the reply was complete. Please try again.");
       }
+      flushAssistantUpdate();
 
-      setMessages((current) =>
-        current.filter(
-          (message, index) =>
-            index !== assistantIndex || (message.role === "assistant" && message.content.length > 0),
-        ),
-      );
+      if (!assistantContent) {
+        updateConversation(conversationId, conversationTitle, conversation);
+      }
     } catch (sendError) {
-      setMessages((current) =>
-        current.filter(
-          (message, index) => index !== conversation.length || message.role !== "assistant",
-        ),
-      );
+      if (updateTimer !== undefined) {
+        clearTimeout(updateTimer);
+        updateTimer = undefined;
+      }
+      updateConversation(conversationId, conversationTitle, conversation);
       setError(
         sendError instanceof Error
           ? sendError.message
@@ -188,7 +405,8 @@ export default function Home() {
   }
 
   function startNewChat() {
-    setMessages([]);
+    if (isSending) return;
+    selectConversation(null);
     setError("");
     setInput("");
     textareaRef.current?.focus();
@@ -204,7 +422,7 @@ export default function Home() {
           <span>kindred</span>
         </Link>
 
-        <button className="new-chat-button" onClick={startNewChat} type="button">
+        <button className="new-chat-button" disabled={isSending} onClick={startNewChat} type="button">
           <span className="new-chat-plus">+</span>
           New conversation
           <kbd>⌘ K</kbd>
@@ -212,10 +430,32 @@ export default function Home() {
 
         <div className="sidebar-section">
           <p className="sidebar-label">CONVERSATIONS</p>
-          <div className="empty-history">
-            <span className="history-line" />
-            <p>Conversations aren&apos;t<br />saved yet.</p>
-          </div>
+          {conversations.length ? (
+            <div className="conversation-history">
+              {conversations.map((conversation) => (
+                <button
+                  aria-current={conversation.id === activeConversationId ? "true" : undefined}
+                  className="conversation-history-item"
+                  disabled={isSending}
+                  key={conversation.id}
+                  onClick={() => {
+                    selectConversation(conversation.id);
+                    setError("");
+                    setInput("");
+                  }}
+                  type="button"
+                >
+                  {conversation.title}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-history">
+              <span className="history-line" />
+              <p>Your conversations<br />will appear here.</p>
+            </div>
+          )}
+          {visibleStorageError ? <p className="storage-notice" role="status">{visibleStorageError}</p> : null}
         </div>
 
         <div className="sidebar-bottom">
@@ -237,10 +477,11 @@ export default function Home() {
             <span>kindred</span>
           </div>
           <div className="conversation-title">
-            <span>{messages[0]?.content.slice(0, 42) || "New conversation"}{messages[0]?.content.length && messages[0].content.length > 42 ? "…" : ""}</span>
+            <span>{activeConversation?.title || "New conversation"}</span>
           </div>
           <button
             className="topbar-new-chat"
+            disabled={isSending}
             onClick={startNewChat}
             type="button"
             aria-label="Start a new conversation"
@@ -279,35 +520,43 @@ export default function Home() {
             </div>
           ) : (
             <div className="message-list" aria-live="polite">
-              {messages.map((message, index) => (
-                <article className={`message message-${message.role}`} key={`${index}-${message.role}`}>
-                  {message.role === "assistant" ? (
-                    <span className="message-avatar"><SparkIcon /></span>
-                  ) : null}
-                  <div className="message-content">
-                    <span className="message-author">
-                      {message.role === "assistant" ? "Kindred" : "You"}
-                    </span>
+              {messages.map((message, index) => {
+                const isStreamingMessage =
+                  isSending && index === messages.length - 1 && message.role === "assistant";
+                return (
+                  <article className={`message message-${message.role}`} key={`${index}-${message.role}`}>
                     {message.role === "assistant" ? (
-                      <div className="markdown-content"><ReactMarkdown>{message.content}</ReactMarkdown></div>
-                    ) : (
-                      <p>{message.content}</p>
-                    )}
-                  </div>
-                  {message.role === "user" ? <span className="user-message-avatar">Y</span> : null}
-                </article>
-              ))}
-              {isSending ? (
-                <article className="message message-assistant">
-                  <span className="message-avatar"><SparkIcon /></span>
-                  <div className="message-content">
-                    <span className="message-author">Kindred</span>
-                    <div className="typing-indicator" aria-label="Kindred is thinking">
-                      <span /><span /><span />
+                      <span className="message-avatar"><SparkIcon /></span>
+                    ) : null}
+                    <div className="message-content">
+                      <span className="message-author">
+                        {message.role === "assistant" ? "Kindred" : "You"}
+                      </span>
+                      {message.role === "assistant" ? (
+                        isStreamingMessage && !message.content ? (
+                          <div className="typing-indicator" aria-label="Kindred is thinking">
+                            <span /><span /><span />
+                          </div>
+                        ) : (
+                          <div className={`markdown-content${isStreamingMessage ? " streaming-content" : ""}`}>
+                            {isStreamingMessage ? (
+                              <>
+                                <span className="streaming-text">{message.content}</span>
+                                <span className="streaming-cursor" aria-hidden="true" />
+                              </>
+                            ) : (
+                              <ReactMarkdown>{message.content}</ReactMarkdown>
+                            )}
+                          </div>
+                        )
+                      ) : (
+                        <p>{message.content}</p>
+                      )}
                     </div>
-                  </div>
-                </article>
-              ) : null}
+                    {message.role === "user" ? <span className="user-message-avatar">Y</span> : null}
+                  </article>
+                );
+              })}
               {error ? (
                 <div className="error-message" role="alert">
                   <span>{error}</span>

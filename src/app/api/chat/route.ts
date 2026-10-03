@@ -7,10 +7,7 @@ type ChatMessage = {
   content: string;
 };
 
-const MAX_MESSAGES = 40;
 const MAX_MESSAGE_LENGTH = 12_000;
-const MAX_CONTEXT_MESSAGES = 16;
-const MAX_CONTEXT_CHARACTERS = 24_000;
 
 function isChatMessage(value: unknown): value is ChatMessage {
   if (typeof value !== "object" || value === null || !("role" in value) || !("content" in value)) {
@@ -32,7 +29,6 @@ function isChatRequest(value: unknown): value is { messages: ChatMessage[] } {
     "messages" in value &&
     Array.isArray(value.messages) &&
     value.messages.length > 0 &&
-    value.messages.length <= MAX_MESSAGES &&
     value.messages.every(isChatMessage)
   );
 }
@@ -42,26 +38,6 @@ function getErrorStatus(error: unknown): number | undefined {
   if ("status" in error && typeof error.status === "number") return error.status;
   if ("code" in error && typeof error.code === "number") return error.code;
   return undefined;
-}
-
-function getRecentContext(messages: ChatMessage[]): ChatMessage[] {
-  const recent: ChatMessage[] = [];
-  let characterCount = 0;
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (
-      recent.length === MAX_CONTEXT_MESSAGES ||
-      characterCount + message.content.length > MAX_CONTEXT_CHARACTERS
-    ) {
-      break;
-    }
-
-    recent.push(message);
-    characterCount += message.content.length;
-  }
-
-  return recent.reverse();
 }
 
 function getVisibleText(content: unknown): string {
@@ -89,7 +65,7 @@ export async function POST(request: Request) {
 
   if (!isChatRequest(body)) {
     return NextResponse.json(
-      { error: `Send between 1 and ${MAX_MESSAGES} valid messages to continue.` },
+      { error: "Send at least one valid message to continue." },
       { status: 400 },
     );
   }
@@ -112,7 +88,7 @@ export async function POST(request: Request) {
     new SystemMessage(
       "You are Kindred, a thoughtful and friendly AI companion. Be clear, warm, and useful. Give only the polished final answer; never include internal reasoning, analysis, or draft options. Answer directly in a few sentences by default and give more detail when the user asks.",
     ),
-    ...getRecentContext(body.messages).map((message) =>
+    ...body.messages.map((message) =>
       message.role === "user"
         ? new HumanMessage(message.content)
         : new AIMessage(message.content),
